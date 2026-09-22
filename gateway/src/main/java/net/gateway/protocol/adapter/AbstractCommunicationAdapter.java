@@ -1,4 +1,4 @@
-package net.gateway.adapter;
+package net.gateway.protocol.adapter;
 
 import net.gateway.protocol.CommunicationAdapter;
 
