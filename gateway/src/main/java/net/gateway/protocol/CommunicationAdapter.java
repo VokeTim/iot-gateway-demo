@@ -47,5 +47,5 @@ public interface CommunicationAdapter {
     /**
      * 批量写入（显式有序结构，避免Map无序问题）
      */
-    WriteResult batchWrite(List<WriteRequest> writeRequests);
+    WriteResult batchWrite(WriteRequest writeRequest);
 }
