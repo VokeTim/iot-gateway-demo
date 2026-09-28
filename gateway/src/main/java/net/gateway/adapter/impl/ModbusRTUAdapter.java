@@ -12,13 +12,15 @@ public class ModbusRTUAdapter extends AbstractModbusAdapter {
 
     private final SerialPortWrapper wrapper;
 
-    protected ModbusRTUAdapter(SerialPortWrapper wrapper,int slaveId, int timeout, int maxRegistersPerRequest) {
-        super(slaveId, timeout, maxRegistersPerRequest);
+    protected ModbusRTUAdapter(SerialPortWrapper wrapper,int slaveId, int timeout, int maxRegistersPerRequest,int retries) {
+        super(slaveId, maxRegistersPerRequest);
         this.wrapper=wrapper;
+        setTimeout(timeout);
+        setRetries(retries);
     }
 
     @Override
-    protected ModbusMaster createMaster() throws Exception {
+    protected ModbusMaster createConnection() {
         return modbusFactory.createRtuMaster(wrapper);
     }
 

@@ -14,11 +14,13 @@ public class ModbusTCPAdapter extends AbstractModbusAdapter {
     private final int port;
     private final boolean keepAlive;
 
-    public ModbusTCPAdapter(String host, int port, int slaveId, boolean keepAlive, int timeout,int maxRegistersPerRequest) {
-        super(slaveId, timeout,maxRegistersPerRequest);
+    public ModbusTCPAdapter(String host, int port, int slaveId, boolean keepAlive, int timeout,int maxRegistersPerRequest,int retries) {
+        super(slaveId,maxRegistersPerRequest);
         this.host = host;
         this.port = port;
         this.keepAlive = keepAlive;
+        setTimeout(timeout);
+        setRetries(retries);
     }
 
     @Override
@@ -27,10 +29,10 @@ public class ModbusTCPAdapter extends AbstractModbusAdapter {
     }
 
     @Override
-    protected ModbusMaster createMaster() throws Exception {
+    protected ModbusMaster createConnection() {
         IpParameters params = new IpParameters();
         params.setHost(host);
         params.setPort(port);
-        return modbusFactory.createTcpMaster(params, keepAlive, timeout);
+        return modbusFactory.createTcpMaster(params, keepAlive, getTimeoutMillis());
     }
 }

@@ -27,7 +27,7 @@ public interface CommunicationAdapter {
      * 重连
      * @return 是否重连成功
      */
-    boolean reconnect();
+    void reconnect();
 
     /**
      * 读取单个点位

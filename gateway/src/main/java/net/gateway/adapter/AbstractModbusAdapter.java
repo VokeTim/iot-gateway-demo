@@ -21,133 +21,77 @@ import java.util.stream.Collectors;
  * Modbus协议桥接器
  */
 @Slf4j
-public abstract class AbstractModbusAdapter extends AbstractCommunicationAdapter {
+public abstract class AbstractModbusAdapter extends AbstractCommunicationAdapter<ModbusMaster> {
 
-    private static final int ERROR_CODE_PARSE_OR_READ = 400;
+    protected final int slaveId;
+    protected final int maxRegistersPerRequest;   // 厂商单帧寄存器上限
+    protected static final int MAX_REGISTERS_PER_FRAME = 123;  // 协议上限
 
-    protected static ModbusFactory modbusFactory = new ModbusFactory();  // 静态共享
+    protected final ModbusFactory modbusFactory = new ModbusFactory();
 
-    private final Object masterLock = new Object();  // 读写共用一把锁
-
-    private static final int DEFAULT_MAX_REGISTERS = 125;
-
-    protected ModbusMaster master;
-
-    /**
-     * 从机地址
-     */
-    protected int slaveId;
-
-    /**
-     * 连接超时
-     */
-    protected int timeout = 3000;        // 默认 3 秒
-
-    /**
-     * 尝试重连次数
-     */
-    protected int retries = 3;
-
-    /**
-     * 单包发送的最大限制
-     */
-    private int maxRegistersPerRequest = 125;
-
-    /**
-     * 批量写入寄存器的最大限制
-     */
-    private static final int MAX_REGISTERS_PER_FRAME = 123;
-
-    protected AbstractModbusAdapter(int slaveId, int timeout,int maxRegistersPerRequest) {
+    protected AbstractModbusAdapter(int slaveId, int maxRegistersPerRequest) {
         this.slaveId = slaveId;
-        this.timeout = timeout;
-        if(maxRegistersPerRequest > 0){
-            this.maxRegistersPerRequest=maxRegistersPerRequest;
-        }
+        // 用 > 0 判断回退默认 125（寄存器读上限），不用 ObjectUtils.isNotEmpty
+        this.maxRegistersPerRequest = maxRegistersPerRequest > 0
+                ? maxRegistersPerRequest : 125;
     }
 
-    /** 子类实现连接创建 */
-    protected abstract ModbusMaster createMaster() throws Exception;
+    // ==================== 子类实现（RTU/TCP） ====================
+    /** RTU→ModbusRtuMaster，TCP→ModbusTcpMaster */
+    @Override
+    protected abstract ModbusMaster createConnection();
 
-    protected ModbusMaster getMaster() throws Exception {
-        if (master == null) {
-            synchronized (this) {
-                if (master == null) {
-                    master = createMaster();
-                    master.setTimeout(timeout);   // ★ 超时统一设置
-                    master.setRetries(0);
-                }
-            }
-        }
-        return master;
+    @Override
+    protected void setTimeout(ModbusMaster master, int timeoutMillis) {
+        master.setTimeout(timeoutMillis);
     }
 
     @Override
-    public void connect() {
-        try {
-            master = createMaster();
-            master.setTimeout(timeout);
-            master.setRetries(retries);
-            master.init();
-        } catch (Exception e) {
-            throw new RuntimeException("Modbus 连接失败", e);
-        }
+    protected void setRetries(ModbusMaster master, int retries) {
+        master.setRetries(retries);
     }
 
     @Override
-    public void disconnect() {
-        if (master != null) {
-            master.destroy();
-            master = null;
-        }
+    protected void doDisconnect(ModbusMaster master) {
+        master.destroy();   // modbus4j 释放资源
     }
 
-    /**
-     * 依据点位配置构建 modbus4j 定位器。
-     * <p>「配置 -> DataType -> BaseLocator」的翻译全部交给 {@link ModbusLocatorBuilder}。</p>
-     */
-    private BaseLocator<?> getLocator(int slaveId, int offset, ModbusProtocolSpecificConfig config) {
-        return ModbusLocatorBuilder.create(slaveId, offset)
-                .fromConfig(config)
-                .build();
-    }
-
+    // ==================== 单个读取 ====================
     @Override
-    public ReadResult read(PointConfig point) {
+    public ReadResult read(PointConfig point){
         long timestamp = System.currentTimeMillis();
         try {
-            ModbusMaster m = getMaster();
+            ModbusMaster m = getConnection();
             ModbusProtocolSpecificConfig config = toModbusConfig(point);
             int offset = Integer.parseInt(point.getAddress());
 
             BaseLocator<?> locator = getLocator(slaveId, offset, config);
             Object value;
-            synchronized (masterLock){
+            synchronized (connectionLock){
                 value = m.getValue(locator);
             }
-            return buildSuccessResult(Collections.singletonList(
+            return buildSuccessReadResult(Collections.singletonList(
                     buildDataPoint(point, value, config, timestamp)),timestamp
             );
         } catch (Exception ex) {
             log.error("读取点位 [{}] 失败", point == null ? null : point.getPointId(), ex);
-            return buildErrorResult(ex, timestamp);
+            return buildErrorReadResult(ex, timestamp);
         }
     }
 
+    // ==================== 批量读取 ====================
     @Override
-    public ReadResult readBatch(List<PointConfig> points) {
+    public ReadResult readBatch(List<PointConfig> points){
         long timestamp = System.currentTimeMillis();
         if (points == null || points.isEmpty()) {
-            return buildSuccessResult(Collections.emptyList(), timestamp);
+            return buildSuccessReadResult(Collections.emptyList(), timestamp);
         }
         try {
-            ModbusMaster m = getMaster();
-
+            ModbusMaster m = getConnection();
             // 锁外分组
             List<RegisterGroup> groups = groupPoints(points, maxRegistersPerRequest);
-
             Map<String, Object> valueMap = new HashMap<>();
-            synchronized (masterLock) {
+            synchronized (connectionLock) {
                 for (RegisterGroup group : groups) {
                     // 构造 batchRead（内部用 pointId 作为 key）
                     BatchRead<String> batchRead = buildBatchRead(group, slaveId);
@@ -173,171 +117,23 @@ public abstract class AbstractModbusAdapter extends AbstractCommunicationAdapter
                     dataPoints.add(buildDataPoint(point, v, toModbusConfig(point), timestamp));
                 }
             }
-            return buildSuccessResult(dataPoints, timestamp);
+            return buildSuccessReadResult(dataPoints, timestamp);
         } catch (Exception ex) {
             log.error("批量读取失败（{} 个点位）", points.size(), ex);
-            return buildErrorResult(ex, timestamp);
+            return buildErrorReadResult(ex, timestamp);
         }
     }
 
-    private BatchRead<String> buildBatchRead(RegisterGroup group, int slaveId) {
-        BatchRead<String> batchRead = new BatchRead<>();
-        for (PointConfig point : group.points) {
-            batchRead.addLocator(point.getPointId(),
-                    getLocator(slaveId, Integer.parseInt(point.getAddress()), toModbusConfig(point)));
-        }
-        batchRead.setContiguousRequests(false);
-        return batchRead;
-    }
-
-    /** 一个分组的描述：地址连续、寄存器总数不超过上限 */
-    private static class RegisterGroup {
-        int startAddress;               // 组内最小地址（起始寄存器）
-        int registerCount;              // 组内累计寄存器数
-        List<PointConfig> points = new ArrayList<>();  // 属于该组的点位
-        RegisterGroup(int startAddress) {
-            this.startAddress = startAddress;
-        }
-    }
-
-    /**
-     * 由分组构造批量读取的请求
-     * @param groups 分组集合
-     * @param slaveId 从机地址
-     * @return 批量读取的请求集合
-     */
-    private List<BatchRead<String>> buildBatchReads(List<RegisterGroup> groups, int slaveId) {
-        List<BatchRead<String>> batchReads = new ArrayList<>();
-        for (RegisterGroup group : groups) {
-            BatchRead<String> batchRead = new BatchRead<>();
-            for (PointConfig point : group.points) {
-                ModbusProtocolSpecificConfig config = toModbusConfig(point);
-                batchRead.addLocator(point.getPointId(),
-                        getLocator(slaveId, Integer.parseInt(point.getAddress()), config));
-            }
-            batchRead.setContiguousRequests(false);
-            batchReads.add(batchRead);
-        }
-        return batchReads;
-    }
-
-
-    /**
-     * 将点位按"地址连续 + 寄存器数不超过 maxRegistersPerRequest"分组。
-     * 完全基于 PointConfig 内容，不碰 BatchRead。
-     */
-    private List<RegisterGroup> groupPoints(List<PointConfig> points, int maxRegistersPerRequest) {
-        List<RegisterGroup> groups = new ArrayList<>();
-        //TODO: 后期需要再前端做数字文本限制输入的操作，否则老是通过try-catch抛出异常会出现现在这样抛不出来的结构
-
-        // 1. 先按地址排序，保证连续性判断正确
-        List<PointConfig> sorted = points.stream()
-                .sorted(Comparator.comparingInt(p -> Integer.parseInt(p.getAddress()))).collect(Collectors.toList());
-
-        // 2. 分组
-        RegisterGroup current = null;
-        int lastAddress = -1;
-        int currentRegisters = 0;
-
-        for (PointConfig point : sorted) {
-            int address = Integer.parseInt(point.getAddress());
-            ModbusProtocolSpecificConfig config = toModbusConfig(point);
-            int regCount = config.getDataByteLength() / 2;   // 字节 → 寄存器数
-
-            // 需要新组：地址不连续，或寄存器数将超上限
-            boolean needNewGroup = current == null
-                    || (address != lastAddress + 1)
-                    || (currentRegisters + regCount > maxRegistersPerRequest);
-
-            if (needNewGroup) {
-                current = new RegisterGroup(address);
-                groups.add(current);
-                currentRegisters = 0;
-            }
-
-            current.points.add(point);
-            currentRegisters += regCount;
-            lastAddress = address;
-        }
-        return groups;
-    }
-
-
-    /** 校验并提取点位协议配置（错误时抛 IllegalArgumentException 并带点位 ID） */
-    private static ModbusProtocolSpecificConfig toModbusConfig(PointConfig point) {
-        if (!(point.getProtocolConfig() instanceof ModbusProtocolSpecificConfig)) {
-            throw new IllegalArgumentException(
-                    "点位 [" + point.getPointId() + "] 缺少 Modbus 协议配置");
-        }
-        return (ModbusProtocolSpecificConfig) point.getProtocolConfig();
-    }
-
-    private static ReadResult buildSuccessResult(List<DataPoint> dataPoints,long timestamp){
-        ReadResult result = new ReadResult();
-        if(dataPoints.size()>0){
-            result.setDataPoints(dataPoints);
-        }else{
-            result.setDataPoints(Collections.emptyList());
-        }
-        result.setSuccess(true);
-        result.setTimestamp(timestamp);
-        return result;
-    }
-
-    /** 构造错误 ReadResult（读单点和批量共用） */
-    private static ReadResult buildErrorResult(Throwable ex, long timestamp) {
-        ReadResult result = new ReadResult();
-        result.setDataPoints(Collections.emptyList());
-        result.setSuccess(false);
-        result.setTimestamp(timestamp);
-        result.setErrorMessage(ex.getMessage());
-        result.setErrorCode(ERROR_CODE_PARSE_OR_READ);
-        return result;
-    }
-
-    /** 组装一个数据点（读单点和批量都用得到） */
-    private static DataPoint buildDataPoint(PointConfig point, Object value,
-                                            ModbusProtocolSpecificConfig config,
-                                            long timestamp) {
-        DataPoint dataPoint = new DataPoint();
-        dataPoint.setPointId(point.getPointId());
-        dataPoint.setValue(value);
-        dataPoint.setOperationDataType(config.getOperationDataType());
-        dataPoint.setTimestamp(timestamp);
-        dataPoint.setQuality(PointQuality.GOOD);
-        return dataPoint;
-    }
-
-
-    /** 带重试的读取（通用定位器，兼容保持/输入寄存器、位读取、多字节类型） */
-    public Object safeRead(BaseLocator<?> locator) throws Exception {
-        Exception lastException = null;
-        for (int i = 1; i <= retries; i++) {
-            try {
-                if (master == null) connect();
-                return master.getValue(locator);
-            } catch (Exception e) {
-                lastException = e;
-                if (i < retries) Thread.sleep(1000 * i);  // 退避等待
-            }
-        }
-        throw new RuntimeException("读取点位失败，已重试 " + retries + " 次", lastException);
-    }
-
-    /** 带重试的读取寄存器 */
-    public Object safeReadRegister(int address,int dataType) throws Exception {
-        return safeRead(BaseLocator.holdingRegister(slaveId, address, dataType));
-    }
-
+    // ==================== 单个写入 ====================
     @Override
     public WriteResult write(PointConfig point, DataPoint value) {
         long timestamp = System.currentTimeMillis();
         try {
             Object decidedValue=value.getValue();
-            ModbusMaster m = getMaster();
+            ModbusMaster m = getConnection();
             BaseLocator<?> locator = getLocator(slaveId, Integer.parseInt(point.getAddress()), toModbusConfig(point));
 
-            synchronized (masterLock) {           // 锁只包 writeRegister
+            synchronized (connectionLock) {           // 锁只包 writeRegister
                 m.setValue(locator, decidedValue);
             }
             return buildSuccessWriteResult(timestamp);
@@ -347,15 +143,16 @@ public abstract class AbstractModbusAdapter extends AbstractCommunicationAdapter
         }
     }
 
+    // ==================== 批量写入 ====================
     @Override
-    public WriteResult batchWrite(WriteRequest writeRequest) {
+    public WriteResult batchWrite(WriteRequest writeRequest){
         long timestamp = System.currentTimeMillis();
         if(writeRequest==null||writeRequest.getDataPoints().size()==0){
             return buildSuccessWriteResult(timestamp);
         }
         try{
-            ModbusMaster m = getMaster();
-            synchronized (masterLock) {           // 整批写持锁，与读互斥
+            ModbusMaster m = getConnection();
+            synchronized (connectionLock) {           // 整批写持锁，与读互斥
                 List<WriteItem> items = new ArrayList<>();
                 for (Map.Entry<PointConfig, DataPoint> entry : writeRequest.getDataPoints().entrySet()) {
                     items.add(buildWriteItem(entry.getKey(), entry.getValue()));
@@ -385,6 +182,30 @@ public abstract class AbstractModbusAdapter extends AbstractCommunicationAdapter
         m.setValue(locator, item.value);
     }
 
+    private boolean isContiguousRegisters(List<WriteItem> group) {
+        for (int i = 1; i < group.size(); i++) {
+            WriteItem prev = group.get(i - 1);
+            WriteItem curr = group.get(i);
+            if (curr.startAddress != prev.startAddress + prev.regCount) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 发一次 FC16 帧 */
+    private void sendWriteRegisters(ModbusMaster m, int startOffset, List<Short> registers) throws Exception {
+        short[] values = new short[registers.size()];
+        for (int i = 0; i < registers.size(); i++) {
+            values[i] = registers.get(i);
+        }
+        WriteRegistersRequest request = new WriteRegistersRequest(slaveId, startOffset, values);
+        WriteRegistersResponse response = (WriteRegistersResponse) m.send(request);
+        if (response.isException()) {
+            throw new RuntimeException("批量写寄存器失败: " + response.getExceptionMessage());
+        }
+    }
+
     private void writeRegistersBatch(ModbusMaster m, List<WriteItem> group) throws Exception {
         // 摊平组内所有点的寄存器值
         List<Short> allRegisters = new ArrayList<>();
@@ -405,19 +226,6 @@ public abstract class AbstractModbusAdapter extends AbstractCommunicationAdapter
                 int chunkSize = Math.min(frameLimit, allRegisters.size() - pos);
                 sendWriteRegisters(m, startOffset + pos, allRegisters.subList(pos, pos + chunkSize));
             }
-        }
-    }
-
-    /** 发一次 FC16 帧 */
-    private void sendWriteRegisters(ModbusMaster m, int startOffset, List<Short> registers) throws Exception {
-        short[] values = new short[registers.size()];
-        for (int i = 0; i < registers.size(); i++) {
-            values[i] = registers.get(i);
-        }
-        WriteRegistersRequest request = new WriteRegistersRequest(slaveId, startOffset, values);
-        WriteRegistersResponse response = (WriteRegistersResponse) m.send(request);
-        if (response.isException()) {
-            throw new RuntimeException("批量写寄存器失败: " + response.getExceptionMessage());
         }
     }
 
@@ -489,17 +297,6 @@ public abstract class AbstractModbusAdapter extends AbstractCommunicationAdapter
         return registers;
     }
 
-    private boolean isContiguousRegisters(List<WriteItem> group) {
-        for (int i = 1; i < group.size(); i++) {
-            WriteItem prev = group.get(i - 1);
-            WriteItem curr = group.get(i);
-            if (curr.startAddress != prev.startAddress + prev.regCount) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     /**
      * 寄存器地址连续的批量写入，不连续的单个写入
      * @param items
@@ -530,6 +327,13 @@ public abstract class AbstractModbusAdapter extends AbstractCommunicationAdapter
         return groups;
     }
 
+    private WriteItem buildWriteItem(PointConfig point, DataPoint dataPoint) {
+        ModbusProtocolSpecificConfig config = toModbusConfig(point);
+        int startAddress = Integer.parseInt(point.getAddress());
+        int regCount = Math.max(1, config.getDataByteLength() / 2);
+        return new WriteItem(point, config, startAddress, regCount, dataPoint.getValue());
+    }
+
     private static class WriteItem {
         final PointConfig point;
         final ModbusProtocolSpecificConfig config;
@@ -555,37 +359,97 @@ public abstract class AbstractModbusAdapter extends AbstractCommunicationAdapter
         }
     }
 
-    private WriteItem buildWriteItem(PointConfig point, DataPoint dataPoint) {
-        ModbusProtocolSpecificConfig config = toModbusConfig(point);
-        int startAddress = Integer.parseInt(point.getAddress());
-        int regCount = Math.max(1, config.getDataByteLength() / 2);
-        return new WriteItem(point, config, startAddress, regCount, dataPoint.getValue());
-    }
 
-    private static WriteResult buildSuccessWriteResult(long timestamp) {
-        WriteResult result = new WriteResult();
-        result.setSuccess(true);
-        result.setTimestamp(timestamp);
-        return result;
-    }
-
-    private static WriteResult buildErrorWriteResult(Exception ex, long timestamp) {
-        WriteResult result = new WriteResult();
-        result.setSuccess(false);
-        result.setTimestamp(timestamp);
-        result.setErrorMessage(ex.getMessage());
-        result.setErrorCode(400);
-        return result;
-    }
-
-    @Override
-    public boolean reconnect() {
-        disconnect();
-        try {
-            connect();
-            return true;
-        } catch (Exception e) {
-            return false;
+    private BatchRead<String> buildBatchRead(RegisterGroup group, int slaveId) {
+        BatchRead<String> batchRead = new BatchRead<>();
+        for (PointConfig point : group.points) {
+            batchRead.addLocator(point.getPointId(),
+                    getLocator(slaveId, Integer.parseInt(point.getAddress()), toModbusConfig(point)));
         }
+        batchRead.setContiguousRequests(false);
+        return batchRead;
+    }
+
+    /** 一个分组的描述：地址连续、寄存器总数不超过上限 */
+    private static class RegisterGroup {
+        int startAddress;               // 组内最小地址（起始寄存器）
+        int registerCount;              // 组内累计寄存器数
+        List<PointConfig> points = new ArrayList<>();  // 属于该组的点位
+        RegisterGroup(int startAddress) {
+            this.startAddress = startAddress;
+        }
+    }
+
+    /**
+     * 将点位按"地址连续 + 寄存器数不超过 maxRegistersPerRequest"分组。
+     * 完全基于 PointConfig 内容，不碰 BatchRead。
+     */
+    private List<RegisterGroup> groupPoints(List<PointConfig> points, int maxRegistersPerRequest) {
+        List<RegisterGroup> groups = new ArrayList<>();
+        //TODO: 后期需要再前端做数字文本限制输入的操作，否则老是通过try-catch抛出异常会出现现在这样抛不出来的结构
+
+        // 1. 先按地址排序，保证连续性判断正确
+        List<PointConfig> sorted = points.stream()
+                .sorted(Comparator.comparingInt(p -> Integer.parseInt(p.getAddress()))).collect(Collectors.toList());
+
+        // 2. 分组
+        RegisterGroup current = null;
+        int lastAddress = -1;
+        int currentRegisters = 0;
+
+        for (PointConfig point : sorted) {
+            int address = Integer.parseInt(point.getAddress());
+            ModbusProtocolSpecificConfig config = toModbusConfig(point);
+            int regCount = config.getDataByteLength() / 2;   // 字节 → 寄存器数
+
+            // 需要新组：地址不连续，或寄存器数将超上限
+            boolean needNewGroup = current == null
+                    || (address != lastAddress + 1)
+                    || (currentRegisters + regCount > maxRegistersPerRequest);
+
+            if (needNewGroup) {
+                current = new RegisterGroup(address);
+                groups.add(current);
+                currentRegisters = 0;
+            }
+
+            current.points.add(point);
+            currentRegisters += regCount;
+            lastAddress = address;
+        }
+        return groups;
+    }
+
+
+    /** 组装一个数据点（读单点和批量都用得到） */
+    private static DataPoint buildDataPoint(PointConfig point, Object value,
+                                            ModbusProtocolSpecificConfig config,
+                                            long timestamp) {
+        DataPoint dataPoint = new DataPoint();
+        dataPoint.setPointId(point.getPointId());
+        dataPoint.setValue(value);
+        dataPoint.setOperationDataType(config.getOperationDataType());
+        dataPoint.setTimestamp(timestamp);
+        dataPoint.setQuality(PointQuality.GOOD);
+        return dataPoint;
+    }
+
+    /**
+     * 依据点位配置构建 modbus4j 定位器。
+     * <p>「配置 -> DataType -> BaseLocator」的翻译全部交给 {@link ModbusLocatorBuilder}。</p>
+     */
+    private BaseLocator<?> getLocator(int slaveId, int offset, ModbusProtocolSpecificConfig config) {
+        return ModbusLocatorBuilder.create(slaveId, offset)
+                .fromConfig(config)
+                .build();
+    }
+
+    /** 校验并提取点位协议配置（错误时抛 IllegalArgumentException 并带点位 ID） */
+    private static ModbusProtocolSpecificConfig toModbusConfig(PointConfig point) {
+        if (!(point.getProtocolConfig() instanceof ModbusProtocolSpecificConfig)) {
+            throw new IllegalArgumentException(
+                    "点位 [" + point.getPointId() + "] 缺少 Modbus 协议配置");
+        }
+        return (ModbusProtocolSpecificConfig) point.getProtocolConfig();
     }
 }
