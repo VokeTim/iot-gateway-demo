@@ -35,6 +35,12 @@
             <artifactId>lombok</artifactId>
             <optional>true</optional> <!-- 或 <scope>provided</scope> -->
         </dependency>
+        <!-- modbus工具包 -->
+        <dependency>
+            <groupId>com.infiniteautomation</groupId>
+            <artifactId>modbus4j</artifactId>
+            <version>3.1.0</version>
+        </dependency>
     </dependencies>
     <dependencyManagement>
         <dependencies>
@@ -47,7 +53,20 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
-
+    <repositories>
+        <!-- Modbus4j 官方发布仓库 -->
+        <repository>
+            <id>ias-releases</id>
+            <name>Infinite Automation Release Repository</name>
+            <url>https://maven.mangoautomation.net/repository/ias-release/</url>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+        </repository>
+    </repositories>
     <build>
         <plugins>
             <plugin>

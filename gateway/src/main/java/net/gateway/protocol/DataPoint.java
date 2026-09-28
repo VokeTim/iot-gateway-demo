@@ -23,7 +23,7 @@ public class DataPoint {
     /**
      * 数据类型（FLOAT, INT, BOOLEAN, STRING）
      */
-    private DataType dataType;
+    private OperationDataType operationDataType;
 
     /**
      * 采集时间

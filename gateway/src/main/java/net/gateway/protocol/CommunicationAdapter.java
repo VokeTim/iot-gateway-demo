@@ -8,6 +8,12 @@ import java.util.List;
 public interface CommunicationAdapter {
 
     /**
+     * 返回当前协议类型
+     * @return
+     */
+    ProtocolType getType();
+
+    /**
      * 连接
      */
     void connect();

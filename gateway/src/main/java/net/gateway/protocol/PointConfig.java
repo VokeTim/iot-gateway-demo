@@ -1,8 +1,11 @@
 package net.gateway.protocol;
 
+import lombok.Data;
+
 /**
  * 点位配置
  */
+@Data
 public class PointConfig {
 
     /**

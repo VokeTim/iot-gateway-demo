@@ -1,0 +1,106 @@
+#######################################################
+# quality-service 子模块 .gitignore
+# 类型：Python (依赖 python-statemachine)
+#######################################################
+
+# ---------- Python 字节码与缓存 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+wheels/
+share/python-wheels/
+*.egg
+*.egg-info/
+*.egg-info
+.installed.cfg
+*.egg-link
+MANIFEST
+
+# ---------- 虚拟环境 ----------
+venv/
+.venv/
+env/
+.env/
+.ENV/
+.python-version
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---------- 测试与覆盖率 ----------
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+coverage.xml
+coverage/
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# ---------- 类型存根与类型检查 ----------
+*.pyi
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# ---------- Django / Web 框架相关 ----------
+*.local
+instance/
+webapp/
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# ---------- 翻译与 i18n ----------
+*.mo
+*.pot
+
+# ---------- 日志 ----------
+*.log
+*.pid
+*.pid.lock
+*.seed
+
+# ---------- 环境变量与密钥 ----------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ---------- IDE（子模块级别再独立写一次，避免被父目录 .gitignore 影响） ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ---------- 构建产物 ----------
+build/
+dist/
+target/
+out/
